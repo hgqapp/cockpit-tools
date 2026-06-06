@@ -372,6 +372,7 @@ struct ProxyDispatchError {
 struct ResolvedLocalApiKey {
     id: String,
     label: String,
+    provider_gateway: Option<CodexLocalAccessProviderGateway>,
     account_ids: Vec<String>,
     model_prefix: Option<String>,
     allowed_models: Vec<String>,
@@ -1306,7 +1307,20 @@ fn visible_codex_model_ids_for_api_key(
     api_key: &ResolvedLocalApiKey,
     health_by_account_id: Option<&HashMap<String, RuntimeAccountHealth>>,
 ) -> Vec<String> {
-    let visible = visible_codex_model_ids_for_collection(collection, health_by_account_id);
+    let mut visible = visible_codex_model_ids_for_collection(collection, health_by_account_id);
+    if let Some(provider_gateway) = api_key.provider_gateway.as_ref() {
+        let mut seen: HashSet<String> = visible
+            .iter()
+            .map(|model| model.trim().to_ascii_lowercase())
+            .filter(|model| !model.is_empty())
+            .collect();
+        for model in &provider_gateway.upstream_models {
+            let model = model.trim();
+            if !model.is_empty() && seen.insert(model.to_ascii_lowercase()) {
+                visible.push(model.to_string());
+            }
+        }
+    }
     let filtered = apply_model_filters(visible, &api_key.allowed_models, &api_key.excluded_models);
     append_codex_internal_model_ids(add_model_prefix(filtered, api_key.model_prefix.as_deref()))
 }
@@ -1352,7 +1366,7 @@ fn validate_client_model_visible(
     if is_codex_internal_model(without_prefix) || is_codex_internal_model(canonical_model) {
         return true;
     }
-    let visible = visible_codex_model_ids_for_collection(collection, health_by_account_id);
+    let visible = visible_codex_model_ids_for_api_key(collection, api_key, health_by_account_id);
     let visible_match = visible.iter().any(|item| {
         item.eq_ignore_ascii_case(without_prefix)
             || item.eq_ignore_ascii_case(canonical_model)
@@ -7620,6 +7634,7 @@ fn resolve_collection_api_key(
         .map(|item| ResolvedLocalApiKey {
             id: item.id.clone(),
             label: item.label.clone(),
+            provider_gateway: item.provider_gateway.clone(),
             account_ids: item.account_ids.clone(),
             model_prefix: item.model_prefix.clone(),
             allowed_models: item.allowed_models.clone(),
@@ -7630,6 +7645,7 @@ fn resolve_collection_api_key(
                 Some(ResolvedLocalApiKey {
                     id: "legacy".to_string(),
                     label: default_local_api_key_label(),
+                    provider_gateway: None,
                     account_ids: Vec::new(),
                     model_prefix: None,
                     allowed_models: Vec::new(),
@@ -16562,8 +16578,8 @@ mod tests {
     use crate::models::codex_local_access::{
         CodexLocalAccessAccountModelRule, CodexLocalAccessClientBaseUrlHost,
         CodexLocalAccessCustomRoutingRule, CodexLocalAccessImageGenerationMode,
-        CodexLocalAccessRequestKind, CodexLocalAccessRoutingStrategy, CodexLocalAccessStats,
-        CodexLocalAccessTimeouts,
+        CodexLocalAccessProviderGateway, CodexLocalAccessRequestKind,
+        CodexLocalAccessRoutingStrategy, CodexLocalAccessStats, CodexLocalAccessTimeouts,
     };
     use crate::models::{
         DefaultInstanceSettings, InstanceLaunchMode, InstanceProfile, InstanceStore,
@@ -18031,6 +18047,7 @@ data: {"type":"response.completed","response":{"id":"resp_123","usage":{"input_t
         let api_key = ResolvedLocalApiKey {
             id: "key-1".to_string(),
             label: "Key".to_string(),
+            provider_gateway: None,
             account_ids: Vec::new(),
             model_prefix: Some("team".to_string()),
             allowed_models: vec!["gpt-*".to_string()],
@@ -18048,6 +18065,43 @@ data: {"type":"response.completed","response":{"id":"resp_123","usage":{"input_t
         assert!(validate_client_model_visible(
             CODEX_AUTO_REVIEW_MODEL_ID,
             CODEX_AUTO_REVIEW_MODEL_ID,
+            &collection,
+            &api_key,
+            None,
+        ));
+    }
+
+    #[test]
+    fn provider_gateway_models_are_visible_for_gateway_api_key() {
+        let collection = test_local_access_collection(vec!["account-1".to_string()]);
+        let api_key = ResolvedLocalApiKey {
+            id: "provider_gateway_account-1".to_string(),
+            label: "Provider Gateway: DeepSeek".to_string(),
+            provider_gateway: Some(CodexLocalAccessProviderGateway {
+                base_url: "https://api.deepseek.com/v1".to_string(),
+                api_key: "sk-test".to_string(),
+                upstream_model: "deepseek-v4-pro".to_string(),
+                upstream_models: vec![
+                    "deepseek-v4-pro".to_string(),
+                    "deepseek-v4-flash".to_string(),
+                ],
+                wire_api: Some("chat_completions".to_string()),
+                supports_vision: false,
+                model_capabilities: HashMap::new(),
+            }),
+            account_ids: vec!["account-1".to_string()],
+            model_prefix: None,
+            allowed_models: Vec::new(),
+            excluded_models: Vec::new(),
+        };
+
+        let models = visible_codex_model_ids_for_api_key(&collection, &api_key, None);
+
+        assert!(models.iter().any(|model| model == "deepseek-v4-pro"));
+        assert!(models.iter().any(|model| model == "deepseek-v4-flash"));
+        assert!(validate_client_model_visible(
+            "deepseek-v4-pro",
+            "deepseek-v4-pro",
             &collection,
             &api_key,
             None,
@@ -18952,6 +19006,7 @@ data: {"error":{"code":"server_error","type":"upstream","message":"stream aborte
         let api_key = ResolvedLocalApiKey {
             id: "client-key-1".to_string(),
             label: "Client".to_string(),
+            provider_gateway: None,
             account_ids: Vec::new(),
             model_prefix: None,
             allowed_models: Vec::new(),
@@ -18990,6 +19045,7 @@ data: {"error":{"code":"server_error","type":"upstream","message":"stream aborte
         let api_key = ResolvedLocalApiKey {
             id: "client-key-1".to_string(),
             label: "Client".to_string(),
+            provider_gateway: None,
             account_ids: Vec::new(),
             model_prefix: None,
             allowed_models: Vec::new(),
@@ -19064,6 +19120,7 @@ data: {"error":{"code":"server_error","type":"upstream","message":"stream aborte
         let api_key = ResolvedLocalApiKey {
             id: "client-key-1".to_string(),
             label: "Client".to_string(),
+            provider_gateway: None,
             account_ids: Vec::new(),
             model_prefix: None,
             allowed_models: Vec::new(),

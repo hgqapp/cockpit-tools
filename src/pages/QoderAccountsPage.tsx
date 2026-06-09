@@ -353,6 +353,9 @@ export function QoderAccountsPage() {
   const [privacyModeEnabled, setPrivacyModeEnabled] = useState<boolean>(() =>
     isPrivacyModeEnabledByDefault(),
   );
+  const [cleanSessionStorage, setCleanSessionStorage] = useState<boolean>(() =>
+    qoderService.getQoderCleanSessionPreference(),
+  );
 
   useEffect(() => {
     const handleFilterPersistenceChanged = (event: Event) => {
@@ -829,6 +832,14 @@ export function QoderAccountsPage() {
     setPrivacyModeEnabled((prev) => {
       const next = !prev;
       persistPrivacyModeEnabled(next);
+      return next;
+    });
+  }, []);
+
+  const toggleCleanSession = useCallback(() => {
+    setCleanSessionStorage((prev) => {
+      const next = !prev;
+      qoderService.setQoderCleanSessionPreference(next);
       return next;
     });
   }, []);
@@ -2054,6 +2065,17 @@ export function QoderAccountsPage() {
                 title={t('accounts.actions.refreshAll', '刷新全部')}
               >
                 <RefreshCw size={14} className={refreshingAll ? 'loading-spinner' : ''} />
+              </button>
+              <button
+                className="btn btn-secondary icon-only"
+                onClick={toggleCleanSession}
+                title={
+                  cleanSessionStorage
+                    ? t('qoder.cleanSession.on', '切换时清理 Session Storage')
+                    : t('qoder.cleanSession.off', '切换时保留 Session Storage')
+                }
+              >
+                <Database size={14} />
               </button>
               <button
                 className="btn btn-secondary icon-only"

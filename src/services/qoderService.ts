@@ -92,8 +92,20 @@ export async function refreshAllQoderTokens(): Promise<number> {
   return await invoke('refresh_all_qoder_tokens');
 }
 
-export async function injectQoderAccount(accountId: string): Promise<string> {
-  return await invoke('inject_qoder_account', { accountId });
+const QODER_CLEAN_SESSION_KEY = 'qoder.cleanSessionStorage';
+
+export function getQoderCleanSessionPreference(): boolean {
+  const saved = localStorage.getItem(QODER_CLEAN_SESSION_KEY);
+  return saved !== null ? saved === 'true' : true;
+}
+
+export function setQoderCleanSessionPreference(value: boolean): void {
+  localStorage.setItem(QODER_CLEAN_SESSION_KEY, String(value));
+}
+
+export async function injectQoderAccount(accountId: string, cleanSessionStorage?: boolean): Promise<string> {
+  const clean = cleanSessionStorage ?? getQoderCleanSessionPreference();
+  return await invoke('inject_qoder_account', { accountId, cleanSessionStorage: clean });
 }
 
 export async function updateQoderAccountTags(

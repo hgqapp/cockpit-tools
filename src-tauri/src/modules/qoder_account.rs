@@ -1307,3 +1307,221 @@ pub fn export_accounts(account_ids: &[String]) -> Result<String, String> {
 
     serde_json::to_string_pretty(&selected).map_err(|e| format!("序列化导出 JSON 失败: {}", e))
 }
+
+/// 获取 Qoder 用户数据目录
+pub fn get_qoder_user_data_dir() -> Result<PathBuf, String> {
+    crate::modules::qoder_instance::get_default_qoder_user_data_dir()
+}
+
+/// 获取 storage.json 路径
+fn get_storage_json_path(user_data_dir: &Path) -> PathBuf {
+    user_data_dir.join("User").join("globalStorage").join("storage.json")
+}
+
+/// 读取 storage.json
+fn read_storage_json(path: &Path) -> Result<serde_json::Value, String> {
+    if !path.exists() {
+        return Ok(serde_json::json!({}));
+    }
+    let content = fs::read_to_string(path)
+        .map_err(|e| format!("读取 storage.json 失败: {}", e))?;
+    if content.trim().is_empty() {
+        return Ok(serde_json::json!({}));
+    }
+    serde_json::from_str(&content)
+        .map_err(|e| format!("解析 storage.json 失败: {}", e))
+}
+
+/// 写入 storage.json
+fn write_storage_json(path: &Path, value: &serde_json::Value) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|e| format!("创建 storage.json 目录失败: {}", e))?;
+    }
+    let content = serde_json::to_string_pretty(value)
+        .map_err(|e| format!("序列化 storage.json 失败: {}", e))?;
+    crate::modules::atomic_write::write_string_atomic(path, &content)
+        .map_err(|e| format!("写入 storage.json 失败: {}", e))
+}
+
+/// 生成随机 UUID
+fn new_uuid() -> String {
+    uuid::Uuid::new_v4().to_string()
+}
+
+/// 生成 MD5 哈希
+fn md5_hex(input: &str) -> String {
+    format!("{:x}", md5::compute(input.as_bytes()))
+}
+
+/// 重置 Qoder 机器 ID 文件
+fn reset_machine_id(user_data_dir: &Path) -> Result<(), String> {
+    let new_id = new_uuid();
+    let machine_id_file = user_data_dir.join("machineid");
+    fs::write(&machine_id_file, &new_id)
+        .map_err(|e| format!("写入 machineid 失败: {}", e))?;
+    logger::log_info(&format!("[Qoder Cleanup] machineid 已重置: {}", new_id));
+
+    let additional_ids = [
+        "deviceid", "hardware_uuid", "system_uuid",
+        "platform_id", "installation_id",
+    ];
+    for name in &additional_ids {
+        let path = user_data_dir.join(name);
+        let _ = fs::write(&path, new_uuid());
+    }
+
+    Ok(())
+}
+
+/// 重置 Qoder telemetry/存储标识
+fn reset_telemetry_identifiers(storage_path: &Path) -> Result<(), String> {
+    let mut data = read_storage_json(storage_path)?;
+
+    let new_uuid_val = new_uuid();
+    let machine_id_hash = md5_hex(&new_uuid_val);
+
+    if let Some(obj) = data.as_object_mut() {
+        obj.insert("telemetry.machineId".to_string(), serde_json::json!(machine_id_hash));
+        obj.insert("telemetry.devDeviceId".to_string(), serde_json::json!(new_uuid()));
+        obj.insert("telemetry.sqmId".to_string(), serde_json::json!(new_uuid()));
+        obj.insert("telemetry.sessionId".to_string(), serde_json::json!(new_uuid()));
+        obj.insert("telemetry.installationId".to_string(), serde_json::json!(new_uuid()));
+        obj.insert("telemetry.clientId".to_string(), serde_json::json!(new_uuid()));
+        obj.insert("telemetry.userId".to_string(), serde_json::json!(new_uuid()));
+        obj.insert("telemetry.anonymousId".to_string(), serde_json::json!(new_uuid()));
+        obj.insert("machineId".to_string(), serde_json::json!(machine_id_hash));
+        obj.insert("deviceId".to_string(), serde_json::json!(new_uuid()));
+        obj.insert("installationId".to_string(), serde_json::json!(new_uuid()));
+        obj.insert("hardwareId".to_string(), serde_json::json!(new_uuid()));
+        obj.insert("platformId".to_string(), serde_json::json!(new_uuid()));
+    }
+
+    write_storage_json(storage_path, &data)?;
+
+    logger::log_info(&format!(
+        "[Qoder Cleanup] telemetry 标识已重置: machineId={}..., deviceId={}",
+        &machine_id_hash[..16],
+        &new_uuid_val[..8]
+    ));
+    Ok(())
+}
+
+/// 清理 Qoder 缓存和身份目录
+fn cleanup_caches(user_data_dir: &Path, clean_session_storage: bool) -> Result<(), String> {
+    let cache_dir_names = [
+        "Cache", "Code Cache", "GPUCache", "DawnGraphiteCache",
+        "DawnWebGPUCache", "ShaderCache", "DawnCache",
+        "blob_storage", "SharedClientCache",
+        "CachedData", "CachedProfilesData", "CachedExtensions",
+        "IndexedDB", "CacheStorage",
+        "Service Worker", "File System",
+    ];
+
+    let mut cleaned = 0u32;
+    for name in &cache_dir_names {
+        let path = user_data_dir.join(name);
+        if path.exists() {
+            if let Err(e) = fs::remove_dir_all(&path) {
+                logger::log_warn(&format!(
+                    "[Qoder Cleanup] 清理缓存目录失败 {}: {}",
+                    name, e
+                ));
+            } else {
+                cleaned += 1;
+            }
+        }
+    }
+
+    let identity_files = [
+        "Network Persistent State",
+        "TransportSecurity",
+        "Trust Tokens", "Trust Tokens-journal",
+        "Cookies", "Cookies-journal",
+        "Login Data", "Login Data-journal",
+        "Web Data", "Web Data-journal",
+        "Local State",
+        "Preferences", "Secure Preferences",
+        "Bookmarks",
+        "Shortcuts", "Shortcuts-journal",
+        "Top Sites", "Top Sites-journal",
+        "Favicons", "Favicons-journal",
+        "History", "History-journal",
+        "Visited Links",
+        "QuotaManager", "QuotaManager-journal",
+        "NetworkDataMigrated",
+        "cert_transparency_reporter_state.json",
+    ];
+
+    let mut identity_cleaned = 0u32;
+    for name in &identity_files {
+        let path = user_data_dir.join(name);
+        if path.exists() {
+            if let Err(e) = fs::remove_file(&path) {
+                logger::log_warn(&format!(
+                    "[Qoder Cleanup] 清理身份文件失败 {}: {}",
+                    name, e
+                ));
+            } else {
+                identity_cleaned += 1;
+            }
+        }
+    }
+
+    let mut storage_dirs: Vec<&str> = vec!["databases", "Local Storage", "WebStorage"];
+    if clean_session_storage {
+        storage_dirs.push("Session Storage");
+    }
+    for name in &storage_dirs {
+        let path = user_data_dir.join(name);
+        if path.exists() {
+            if let Err(e) = fs::remove_dir_all(&path) {
+                logger::log_warn(&format!(
+                    "[Qoder Cleanup] 清理存储目录失败 {}: {}",
+                    name, e
+                ));
+            } else {
+                identity_cleaned += 1;
+            }
+        }
+    }
+
+    logger::log_info(&format!(
+        "[Qoder Cleanup] 缓存和身份文件清理完成: cache_dirs={}, identity_files={}",
+        cleaned, identity_cleaned
+    ));
+    Ok(())
+}
+
+/// 执行彻底的 Qoder 身份重置（在注入账号后切换前调用）
+/// 清理 machineid / telemetry 标识 / 缓存 / 身份文件
+/// 默认清理 Session Storage；传入 `clean_session_storage: false` 可保留 Session Storage
+#[allow(dead_code)]
+pub fn reset_qoder_identity(account_id: &str) -> Result<(), String> {
+    reset_qoder_identity_with_opts(account_id, true)
+}
+
+/// 与 `reset_qoder_identity` 相同，但可控制是否清理 Session Storage
+pub fn reset_qoder_identity_with_opts(account_id: &str, clean_session_storage: bool) -> Result<(), String> {
+    let user_data_dir = get_qoder_user_data_dir()?;
+
+    logger::log_info(&format!(
+        "[Qoder Cleanup] 开始彻底身份清理: account_id={}, user_data_dir={}",
+        account_id,
+        user_data_dir.to_string_lossy()
+    ));
+
+    reset_machine_id(&user_data_dir)?;
+
+    let storage_path = get_storage_json_path(&user_data_dir);
+    reset_telemetry_identifiers(&storage_path)?;
+
+    cleanup_caches(&user_data_dir, clean_session_storage)?;
+
+    logger::log_info(&format!(
+        "[Qoder Cleanup] 彻底身份清理完成: account_id={}",
+        account_id
+    ));
+
+    Ok(())
+}

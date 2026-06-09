@@ -166,7 +166,7 @@ pub async fn refresh_all_qoder_tokens(app: AppHandle) -> Result<i32, String> {
 }
 
 #[tauri::command]
-pub async fn inject_qoder_account(app: AppHandle, account_id: String) -> Result<String, String> {
+pub async fn inject_qoder_account(app: AppHandle, account_id: String, clean_session_storage: Option<bool>) -> Result<String, String> {
     let started_at = Instant::now();
     logger::log_info(&format!(
         "[Qoder Switch] 开始切换账号: account_id={}",
@@ -177,6 +177,15 @@ pub async fn inject_qoder_account(app: AppHandle, account_id: String) -> Result<
         .ok_or_else(|| format!("Qoder 账号不存在: {}", account_id))?;
 
     qoder_account::inject_to_qoder(&account_id)?;
+
+    let clean_session = clean_session_storage.unwrap_or(true);
+    if let Err(err) = qoder_account::reset_qoder_identity_with_opts(&account_id, clean_session) {
+        logger::log_warn(&format!(
+            "[Qoder Switch] 身份清理出现异常(不影响切换): {}",
+            err
+        ));
+    }
+
     crate::modules::provider_current_state::set_current_account_id(
         "qoder",
         Some(account_id.as_str()),
